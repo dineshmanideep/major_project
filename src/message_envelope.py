@@ -1,0 +1,146 @@
+"""AES-256-GCM envelopes for MQTT payloads.
+
+The MQTT topic is deliberately authenticated but is not included in the JSON
+envelope: MQTT already carries it for routing.  A relay that changes a message's
+topic will therefore cause authentication to fail at the receiver.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import os
+from typing import Any, Mapping
+
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from src.topic_keys import TopicKeyError, derive_topic_key
+
+
+PROTOCOL_VERSION = 1
+NONCE_LENGTH = 12
+TAG_LENGTH = 16
+
+
+class EnvelopeError(ValueError):
+    """Raised when an encrypted MQTT message is malformed or unauthentic."""
+
+
+def _b64encode(value: bytes) -> str:
+    return base64.b64encode(value).decode("ascii")
+
+
+def _b64decode(value: Any, field: str) -> bytes:
+    if not isinstance(value, str):
+        raise EnvelopeError(f"{field} must be a base64 string")
+    try:
+        return base64.b64decode(value, validate=True)
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise EnvelopeError(f"{field} is not valid base64") from exc
+
+
+def _aad(topic: str, sender_id: str, key_version: int) -> bytes:
+    """Canonical data that must stay bound to an encrypted MQTT message."""
+    if not isinstance(sender_id, str) or not sender_id:
+        raise EnvelopeError("sender_id must be a non-empty string")
+    if not isinstance(key_version, int) or key_version < 1:
+        raise EnvelopeError("key_version must be a positive integer")
+    try:
+        topic_bytes = topic.encode("utf-8")
+        sender_bytes = sender_id.encode("utf-8")
+    except (AttributeError, UnicodeEncodeError) as exc:
+        raise EnvelopeError("topic and sender_id must be UTF-8 strings") from exc
+    if len(topic_bytes) > 65535 or len(sender_bytes) > 65535:
+        raise EnvelopeError("topic or sender_id is too long")
+    return (
+        b"MP1-MSG-v1"
+        + len(topic_bytes).to_bytes(2, "big")
+        + topic_bytes
+        + len(sender_bytes).to_bytes(2, "big")
+        + sender_bytes
+        + key_version.to_bytes(8, "big")
+    )
+
+
+def encrypt_payload(
+    plaintext: bytes,
+    topic: str,
+    held_key: bytes,
+    held_path: str,
+    sender_id: str,
+    key_version: int,
+) -> dict[str, Any]:
+    """Encrypt one payload under the leaf key derived for ``topic``.
+
+    The return value is JSON-serialisable and can be published as the MQTT
+    message body.  A unique 96-bit nonce is generated for every encryption.
+    """
+    if not isinstance(plaintext, bytes):
+        raise EnvelopeError("plaintext must be bytes")
+    try:
+        topic_key = derive_topic_key(held_key, held_path, topic)
+    except TopicKeyError as exc:
+        raise EnvelopeError(str(exc)) from exc
+
+    nonce = os.urandom(NONCE_LENGTH)
+    encrypted = AESGCM(topic_key).encrypt(nonce, plaintext, _aad(topic, sender_id, key_version))
+    return {
+        "protocol_version": PROTOCOL_VERSION,
+        "key_version": key_version,
+        "sender_id": sender_id,
+        "nonce": _b64encode(nonce),
+        "ciphertext": _b64encode(encrypted[:-TAG_LENGTH]),
+        "tag": _b64encode(encrypted[-TAG_LENGTH:]),
+    }
+
+
+def decrypt_payload(
+    envelope: Mapping[str, Any],
+    topic: str,
+    held_key: bytes,
+    held_path: str,
+) -> bytes:
+    """Authenticate and decrypt an envelope using an authorised ancestor key."""
+    if not isinstance(envelope, Mapping):
+        raise EnvelopeError("envelope must be a mapping")
+    required = {"protocol_version", "key_version", "sender_id", "nonce", "ciphertext", "tag"}
+    if set(envelope) != required:
+        raise EnvelopeError("envelope fields do not match protocol version 1")
+    if envelope["protocol_version"] != PROTOCOL_VERSION:
+        raise EnvelopeError("unsupported protocol version")
+
+    nonce = _b64decode(envelope["nonce"], "nonce")
+    ciphertext = _b64decode(envelope["ciphertext"], "ciphertext")
+    tag = _b64decode(envelope["tag"], "tag")
+    if len(nonce) != NONCE_LENGTH:
+        raise EnvelopeError("nonce must be 12 bytes")
+    if len(tag) != TAG_LENGTH:
+        raise EnvelopeError("tag must be 16 bytes")
+    try:
+        topic_key = derive_topic_key(held_key, held_path, topic)
+        return AESGCM(topic_key).decrypt(
+            nonce,
+            ciphertext + tag,
+            _aad(topic, envelope["sender_id"], envelope["key_version"]),
+        )
+    except TopicKeyError as exc:
+        raise EnvelopeError(str(exc)) from exc
+    except InvalidTag as exc:
+        raise EnvelopeError("message authentication failed") from exc
+
+
+def serialise_envelope(envelope: Mapping[str, Any]) -> bytes:
+    """Convert an envelope into the UTF-8 MQTT payload to publish."""
+    return json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def parse_envelope(payload: bytes) -> dict[str, Any]:
+    """Parse an MQTT payload before passing it to :func:`decrypt_payload`."""
+    try:
+        result = json.loads(payload.decode("utf-8"))
+    except (AttributeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise EnvelopeError("payload is not a valid JSON envelope") from exc
+    if not isinstance(result, dict):
+        raise EnvelopeError("payload must contain a JSON object")
+    return result
