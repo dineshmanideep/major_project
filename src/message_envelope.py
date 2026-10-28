@@ -27,6 +27,19 @@ class EnvelopeError(ValueError):
     """Raised when an encrypted MQTT message is malformed or unauthentic."""
 
 
+class ReplayProtector:
+    """Track the newest accepted sequence for each sender/topic pair."""
+
+    def __init__(self) -> None:
+        self._last_seen: dict[tuple[str, str, int], int] = {}
+
+    def accept(self, topic: str, sender_id: str, key_version: int, sequence: int) -> None:
+        previous = self._last_seen.get((topic, sender_id, key_version), 0)
+        if sequence <= previous:
+            raise EnvelopeError("replayed or out-of-order message")
+        self._last_seen[(topic, sender_id, key_version)] = sequence
+
+
 def _b64encode(value: bytes) -> str:
     return base64.b64encode(value).decode("ascii")
 
@@ -40,12 +53,14 @@ def _b64decode(value: Any, field: str) -> bytes:
         raise EnvelopeError(f"{field} is not valid base64") from exc
 
 
-def _aad(topic: str, sender_id: str, key_version: int) -> bytes:
+def _aad(topic: str, sender_id: str, key_version: int, sequence: int) -> bytes:
     """Canonical data that must stay bound to an encrypted MQTT message."""
     if not isinstance(sender_id, str) or not sender_id:
         raise EnvelopeError("sender_id must be a non-empty string")
     if not isinstance(key_version, int) or key_version < 1:
         raise EnvelopeError("key_version must be a positive integer")
+    if not isinstance(sequence, int) or sequence < 1:
+        raise EnvelopeError("sequence must be a positive integer")
     try:
         topic_bytes = topic.encode("utf-8")
         sender_bytes = sender_id.encode("utf-8")
@@ -60,6 +75,7 @@ def _aad(topic: str, sender_id: str, key_version: int) -> bytes:
         + len(sender_bytes).to_bytes(2, "big")
         + sender_bytes
         + key_version.to_bytes(8, "big")
+        + sequence.to_bytes(8, "big")
     )
 
 
@@ -70,6 +86,7 @@ def encrypt_payload(
     held_path: str,
     sender_id: str,
     key_version: int,
+    sequence: int = 1,
 ) -> dict[str, Any]:
     """Encrypt one payload under the leaf key derived for ``topic``.
 
@@ -84,10 +101,13 @@ def encrypt_payload(
         raise EnvelopeError(str(exc)) from exc
 
     nonce = os.urandom(NONCE_LENGTH)
-    encrypted = AESGCM(topic_key).encrypt(nonce, plaintext, _aad(topic, sender_id, key_version))
+    encrypted = AESGCM(topic_key).encrypt(
+        nonce, plaintext, _aad(topic, sender_id, key_version, sequence)
+    )
     return {
         "protocol_version": PROTOCOL_VERSION,
         "key_version": key_version,
+        "sequence": sequence,
         "sender_id": sender_id,
         "nonce": _b64encode(nonce),
         "ciphertext": _b64encode(encrypted[:-TAG_LENGTH]),
@@ -104,7 +124,7 @@ def decrypt_payload(
     """Authenticate and decrypt an envelope using an authorised ancestor key."""
     if not isinstance(envelope, Mapping):
         raise EnvelopeError("envelope must be a mapping")
-    required = {"protocol_version", "key_version", "sender_id", "nonce", "ciphertext", "tag"}
+    required = {"protocol_version", "key_version", "sequence", "sender_id", "nonce", "ciphertext", "tag"}
     if set(envelope) != required:
         raise EnvelopeError("envelope fields do not match protocol version 1")
     if envelope["protocol_version"] != PROTOCOL_VERSION:
@@ -122,7 +142,7 @@ def decrypt_payload(
         return AESGCM(topic_key).decrypt(
             nonce,
             ciphertext + tag,
-            _aad(topic, envelope["sender_id"], envelope["key_version"]),
+            _aad(topic, envelope["sender_id"], envelope["key_version"], envelope["sequence"]),
         )
     except TopicKeyError as exc:
         raise EnvelopeError(str(exc)) from exc

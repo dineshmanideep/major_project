@@ -3,6 +3,7 @@
 import unittest
 
 from src.mqtt_prototype import EncryptedPublisher, EncryptedSubscriber, InMemoryBroker
+from src.message_envelope import serialise_envelope
 from src.topic_keys import derive_topic_key
 
 
@@ -49,6 +50,16 @@ class EncryptedMqttPrototypeTests(unittest.TestCase):
 
         self.assertEqual(subscriber.received, [])
         self.assertEqual(len(subscriber.rejected), 1)
+
+    def test_replayed_valid_envelope_is_rejected(self):
+        subscriber = EncryptedSubscriber(self.broker, ROOT_KEY, LINE3)
+        subscriber.subscribe()
+        envelope = self.publisher.publish(OVEN_TEMP, b"182.4")
+        self.broker.publish(OVEN_TEMP, serialise_envelope(envelope))
+
+        self.assertEqual(subscriber.received, [(OVEN_TEMP, b"182.4")])
+        self.assertEqual(len(subscriber.rejected), 1)
+        self.assertIn("replayed", subscriber.rejected[0][1])
 
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ from src.message_envelope import (
     decrypt_payload,
     encrypt_payload,
     parse_envelope,
+    ReplayProtector,
     serialise_envelope,
 )
 from src.topic_keys import TopicKeyError, derive_topic_key
@@ -76,8 +77,10 @@ class EncryptedPublisher:
     held_key: bytes
     held_path: str
     key_version: int
+    _sequences: dict[str, int] = field(default_factory=dict)
 
     def publish(self, topic: str, plaintext: bytes) -> dict[str, Any]:
+        sequence = self._sequences.get(topic, 0) + 1
         envelope = encrypt_payload(
             plaintext,
             topic,
@@ -85,7 +88,9 @@ class EncryptedPublisher:
             self.held_path,
             self.sender_id,
             self.key_version,
+            sequence,
         )
+        self._sequences[topic] = sequence
         self.transport.publish(topic, serialise_envelope(envelope))
         return envelope
 
@@ -99,6 +104,7 @@ class EncryptedSubscriber:
     held_path: str
     received: list[tuple[str, bytes]] = field(default_factory=list)
     rejected: list[tuple[str, str]] = field(default_factory=list)
+    replay_protector: ReplayProtector = field(default_factory=ReplayProtector)
 
     def subscribe(self) -> None:
         """Subscribe exactly to the subtree represented by the held key."""
@@ -106,7 +112,11 @@ class EncryptedSubscriber:
 
     def _handle_message(self, topic: str, payload: bytes) -> None:
         try:
-            plaintext = decrypt_payload(parse_envelope(payload), topic, self.held_key, self.held_path)
+            envelope = parse_envelope(payload)
+            plaintext = decrypt_payload(envelope, topic, self.held_key, self.held_path)
+            self.replay_protector.accept(
+                topic, envelope["sender_id"], envelope["key_version"], envelope["sequence"]
+            )
         except EnvelopeError as exc:
             self.rejected.append((topic, str(exc)))
             return

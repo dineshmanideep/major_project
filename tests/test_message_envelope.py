@@ -48,3 +48,9 @@ class MessageEnvelopeTests(unittest.TestCase):
         modified["sender_id"] = "attacker"
         with self.assertRaisesRegex(EnvelopeError, "authentication failed"):
             decrypt_payload(modified, TOPIC, ROOT_KEY, LINE3)
+
+    def test_sequence_tampering_is_detected(self):
+        modified = copy.deepcopy(self.envelope)
+        modified["sequence"] = 2
+        with self.assertRaisesRegex(EnvelopeError, "authentication failed"):
+            decrypt_payload(modified, TOPIC, ROOT_KEY, LINE3)
