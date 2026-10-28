@@ -75,6 +75,8 @@ This is the first end-to-end application layer over the encryption modules.
 - `PahoMqttTransport` is a live adapter for a Mosquitto-compatible broker,
   using the `paho-mqtt` package. The caller subscribes first, then runs its
   MQTT client network loop.
+- `FaultInjectingBroker` extends the in-memory relay for recovery tests by
+  deliberately dropping selected publishes once.
 
 ### 4. Multiple authorised subscribers
 
@@ -172,6 +174,46 @@ updates entirely in Python; no ESP32 or physical sensor is needed.
   members, exclusion of the revoked vendor, and encrypted telemetry after key
   rotation.
 
+### 9. Authenticated post-quantum ML-KEM onboarding
+
+**Code:** `src/pqc_onboarding.py`
+
+The software simulation now implements the planned post-quantum bootstrap
+instead of relying on a pre-shared key-update channel.
+
+- Each simulated device creates an ML-KEM-512 keypair and signs its bootstrap
+  request with a device Ed25519 identity key.
+- The Key Controller validates the pre-registered device public key, performs
+  ML-KEM encapsulation, and derives a 32-byte key-distribution session key.
+- The controller signs its response using its Ed25519 identity key; the device
+  verifies this signature before ML-KEM decapsulation and session-key use.
+- The resulting per-device session key replaces the simulation placeholder
+  distribution key and encrypts later branch-key updates.
+- Invalid device identities and altered controller responses are rejected in
+  the test suite.
+- The Key Controller and each device retain separate copies of the
+  independently ML-KEM-derived session key. The distributor uses only the
+  controller-side copy; it does not read a device's local key state.
+- Devices send an AES-GCM-protected installation acknowledgement after each
+  key update. The controller retries a dropped update or acknowledgement, and
+  a session can be expired and established afresh through onboarding.
+
+### 10. End-to-end session recovery simulation
+
+**Code:** `tests/test_end_to_end_session.py`
+
+The simulation now covers the practical lifecycle around session establishment:
+
+- The controller and device independently retain the same ML-KEM-derived
+  session key, with separate local state.
+- A branch-key update is considered installed only after the controller verifies
+  the device's encrypted acknowledgement.
+- A dropped update is retransmitted up to a configured attempt limit.
+- A dropped acknowledgement is recovered by retransmitting the same versioned
+  update; the device re-acknowledges it without accepting conflicting key data.
+- Expiring controller-side session state prevents further key distribution until
+  the device completes a fresh authenticated ML-KEM onboarding exchange.
+
 ## Security properties tested
 
 **Test files:** `tests/test_topic_keys.py`, `tests/test_message_envelope.py`,
@@ -194,6 +236,8 @@ updates entirely in Python; no ESP32 or physical sensor is needed.
 - Simulated devices receive only their own encrypted key-update messages.
 - A revoked simulated device retains only its old credential and cannot decrypt
   telemetry encrypted after the rotated credential is distributed.
+- ML-KEM onboarding requires a registered device identity and rejects a forged
+  controller response.
 
 ## Install and verify
 
@@ -224,15 +268,27 @@ The console trace shows public routing metadata only (topics and encrypted byte
 lengths), then reports which simulated users could decrypt before and after the
 vendor is revoked. It never prints branch keys.
 
+## Run local evaluation metrics
+
+Measure the implemented KDF, AES-GCM encryption/decryption, ML-KEM onboarding,
+lazy rekeying, and envelope size in the local Python process:
+
+```bash
+python3 -m src.evaluation
+```
+
+The output is JSON with mean microsecond timings. These values are useful for
+the simulation report, but are not ESP32 or network-latency measurements.
+
 ## Not implemented yet
 
 The following planned project components are intentionally outside the current
 Python prototype:
 
 - ESP32 firmware implementing the matching mbedTLS HKDF and AES-GCM logic.
-- Authenticated ML-KEM onboarding and encrypted credential distribution between
-  a device and the trusted Key Controller. The current encrypted distribution
-  simulation uses pre-provisioned per-device keys in place of ML-KEM.
+- Production deployment and performance validation of ML-KEM on physical
+  ESP32 hardware. The local simulation uses ML-KEM-512 successfully but is not
+  a hardware compatibility result.
 - Persistent Key Controller storage, real device identity credentials, and an
   administration API.
 - Production MQTT authorisation/ACL configuration and durable reconnect logic.

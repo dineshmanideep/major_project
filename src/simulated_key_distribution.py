@@ -14,6 +14,7 @@ import base64
 from dataclasses import dataclass, field
 import json
 import os
+from collections.abc import Callable
 from typing import Any
 
 from cryptography.exceptions import InvalidTag
@@ -38,6 +39,10 @@ def _topic(device_id: str) -> str:
     return f"{_UPDATE_PREFIX}/{device_id}/branch-key-update"
 
 
+def _ack_topic(device_id: str) -> str:
+    return f"{_UPDATE_PREFIX}/{device_id}/branch-key-ack"
+
+
 def _aad(device_id: str, branch_path: str, key_version: int) -> bytes:
     fields = (device_id, branch_path)
     encoded = []
@@ -49,9 +54,13 @@ def _aad(device_id: str, branch_path: str, key_version: int) -> bytes:
     return b"MP1-SIM-KEY-UPDATE-v1" + b"".join(encoded) + key_version.to_bytes(8, "big")
 
 
+def _ack_aad(device_id: str, branch_path: str, key_version: int) -> bytes:
+    return b"MP1-SIM-KEY-ACK-v1" + _aad(device_id, branch_path, key_version)
+
+
 @dataclass
 class SimulatedDevice:
-    """Software-only device holding a simulated secure controller channel."""
+    """Software-only endpoint with private local session and branch state."""
 
     device_id: str
     transport: MqttTransport
@@ -96,11 +105,26 @@ class SimulatedDevice:
             if len(root_key) != KEY_LENGTH:
                 raise KeyUpdateError("invalid branch root key")
             old = self.credentials.get(branch)
-            if old is not None and version <= old.key_version:
+            if old is not None and version < old.key_version:
                 raise KeyUpdateError("key-update version is not newer")
-            self.credentials[branch] = BranchCredential(branch, root_key, version)
+            if old is None or version > old.key_version:
+                self.credentials[branch] = BranchCredential(branch, root_key, version)
+            elif old.root_key != root_key:
+                raise KeyUpdateError("conflicting key-update version")
+            self._send_ack(branch, version)
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, InvalidTag, KeyUpdateError) as exc:
             self.rejected_updates.append(str(exc))
+
+    def _send_ack(self, branch_path: str, key_version: int) -> None:
+        nonce = os.urandom(_NONCE_LENGTH)
+        ciphertext = AESGCM(self.distribution_key).encrypt(
+            nonce, b"installed", _ack_aad(self.device_id, branch_path, key_version)
+        )
+        self.transport.publish(_ack_topic(self.device_id), json.dumps({
+            "v": _UPDATE_VERSION, "branch": branch_path, "key_version": key_version,
+            "nonce": base64.b64encode(nonce).decode("ascii"),
+            "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
+        }, sort_keys=True).encode("utf-8"))
 
 
 @dataclass
@@ -110,13 +134,15 @@ class SimulatedKeyDistributor:
     controller: KeyController
     transport: MqttTransport
     devices: dict[str, SimulatedDevice] = field(default_factory=dict)
+    session_key_for: Callable[[str], bytes] | None = None
+    acknowledgement_received: Callable[[str, str, int], bool] | None = None
 
     def register_device(self, device: SimulatedDevice) -> None:
         if device.device_id in self.devices:
             raise KeyUpdateError("device is already registered")
         self.devices[device.device_id] = device
 
-    def distribute_branch(self, branch_path: str) -> BranchCredential:
+    def distribute_branch(self, branch_path: str, max_attempts: int = 3) -> BranchCredential:
         """Deliver the current credential to every remaining authorised member.
 
         Obtaining the first credential triggers a lazy rekey if the branch is
@@ -138,12 +164,20 @@ class SimulatedKeyDistributor:
         for device, device_credential in credentials:
             if device_credential != credential:
                 raise KeyUpdateError("controller returned inconsistent branch credentials")
-            self._send_update(device, credential)
+            for _ in range(max_attempts):
+                self._send_update(device, credential)
+                if self.acknowledgement_received is None or self.acknowledgement_received(
+                    device.device_id, credential.branch_path, credential.key_version
+                ):
+                    break
+            else:
+                raise KeyUpdateError(f"key-update acknowledgement missing for {device.device_id}")
         return credential
 
     def _send_update(self, device: SimulatedDevice, credential: BranchCredential) -> None:
         nonce = os.urandom(_NONCE_LENGTH)
-        ciphertext = AESGCM(device.distribution_key).encrypt(
+        session_key = device.distribution_key if self.session_key_for is None else self.session_key_for(device.device_id)
+        ciphertext = AESGCM(session_key).encrypt(
             nonce,
             credential.root_key,
             _aad(device.device_id, credential.branch_path, credential.key_version),

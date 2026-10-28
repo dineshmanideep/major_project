@@ -69,6 +69,22 @@ class InMemoryBroker:
 
 
 @dataclass
+class FaultInjectingBroker(InMemoryBroker):
+    """In-memory relay that can drop selected publishes to test recovery paths."""
+
+    drop_once_topics: set[str] = field(default_factory=set)
+
+    def drop_next(self, topic: str) -> None:
+        self.drop_once_topics.add(topic)
+
+    def publish(self, topic: str, payload: bytes) -> None:
+        if topic in self.drop_once_topics:
+            self.drop_once_topics.remove(topic)
+            return
+        super().publish(topic, payload)
+
+
+@dataclass
 class EncryptedPublisher:
     """Encrypt sensor bytes once and publish only the resulting envelope."""
 
