@@ -198,21 +198,34 @@ instead of relying on a pre-shared key-update channel.
   key update. The controller retries a dropped update or acknowledgement, and
   a session can be expired and established afresh through onboarding.
 
-### 10. End-to-end session recovery simulation
+### 11. Logical Key Hierarchy (LKH) O(log N) tree-based rekeying
 
-**Code:** `tests/test_end_to_end_session.py`
+**Code:** `src/lkh_tree.py`, `tests/test_lkh.py`
 
-The simulation now covers the practical lifecycle around session establishment:
+This module implements a balanced binary key tree for topic branches to optimize
+rekeying overhead when members are revoked:
 
-- The controller and device independently retain the same ML-KEM-derived
-  session key, with separate local state.
-- A branch-key update is considered installed only after the controller verifies
-  the device's encrypted acknowledgement.
-- A dropped update is retransmitted up to a configured attempt limit.
-- A dropped acknowledgement is recovered by retransmitting the same versioned
-  update; the device re-acknowledges it without accepting conflicting key data.
-- Expiring controller-side session state prevents further key distribution until
-  the device completes a fresh authenticated ML-KEM onboarding exchange.
+- Each member occupies a leaf node in the binary key tree and holds only the
+  keys along the path from its leaf up to the branch root key.
+- On revocation, fresh keys are generated for the compromised ancestor path.
+- The Key Controller bundles at most $2 \lceil \log_2 N \rceil$ ciphertexts
+  into a single broadcast rekey package, achieving true $O(\log N)$ logarithmic
+  rekeying distribution.
+- Remaining members decrypt their respective path update in $O(\log N)$ time,
+  while the revoked member cannot decrypt any ciphertext in the package.
+
+### 12. Standalone Multi-Process TCP Network Implementation
+
+**Code:** `network_implementation/`
+
+A standalone, multi-process network implementation where all nodes communicate
+over real TCP network sockets using the MQTT 3.1.1 protocol:
+
+- `broker_service.py`: Lightweight standalone asyncio MQTT TCP broker (no sudo needed).
+- `controller_service.py`: Standalone daemon for the Key Controller managing ML-KEM-512 onboarding and LKH rekeying.
+- `publisher_node.py` and `subscriber_node.py`: Autonomous publisher and subscriber processes.
+- `run_network_demo.py`: Complete multi-process orchestrator script testing live PQC onboarding, encrypted telemetry, and LKH rekeying over TCP.
+- `test_network.py`: Automated multi-process TCP integration test.
 
 ## Security properties tested
 
@@ -280,6 +293,14 @@ python3 -m src.evaluation
 The output is JSON with mean microsecond timings. These values are useful for
 the simulation report, but are not ESP32 or network-latency measurements.
 
+## Run the standalone multi-process network demo
+
+Run the complete multi-process testbed over real TCP network sockets:
+
+```bash
+python3 -m network_implementation.run_network_demo
+```
+
 ## Not implemented yet
 
 The following planned project components are intentionally outside the current
@@ -289,10 +310,8 @@ Python prototype:
 - Production deployment and performance validation of ML-KEM on physical
   ESP32 hardware. The local simulation uses ML-KEM-512 successfully but is not
   a hardware compatibility result.
-- Persistent Key Controller storage, real device identity credentials, and an
-  administration API.
-- Production MQTT authorisation/ACL configuration and durable reconnect logic.
-- Logical Key Hierarchy optimisation for distribution to very large groups.
-- Latency, rekey-cost, and long-duration reliability benchmarking.
+- Hardware Security Modules (HSM) or OS keystore protection for Key Controller root keys.
+- Production MQTT broker ACL / authorization rules configuration.
+- Latency, rekey-cost, and long-duration reliability benchmarking on physical wireless links.
 - Persistent replay state across subscriber restarts. Replay state is currently
   retained in memory for the lifetime of each simulated subscriber.

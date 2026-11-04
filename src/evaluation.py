@@ -8,6 +8,7 @@ from statistics import mean
 from time import perf_counter_ns
 
 from src.key_controller import KeyController
+from src.lkh_tree import LkhTree
 from src.message_envelope import decrypt_payload, encrypt_payload
 from src.mqtt_prototype import InMemoryBroker
 from src.pqc_onboarding import MlKemOnboardingClient, MlKemOnboardingController
@@ -30,6 +31,8 @@ class EvaluationMetrics:
     decrypt_us: float
     ml_kem_onboarding_us: float
     lazy_rekey_us: float
+    lkh_rekey_us: float
+    lkh_rekey_messages: int
     telemetry_envelope_bytes: int
 
     def as_json(self) -> str:
@@ -71,6 +74,14 @@ def measure(iterations: int = 100) -> EvaluationMetrics:
         controller.revoke("vendor", BRANCH)
         controller.credential_for("motor-01", BRANCH)
 
+    def lkh_rekey() -> None:
+        members = [f"dev_{i}" for i in range(8)]
+        tree = LkhTree(BRANCH, members)
+        tree.revoke_member("dev_0")
+
+    tree8 = LkhTree(BRANCH, [f"dev_{i}" for i in range(8)])
+    _, pkg8 = tree8.revoke_member("dev_0")
+
     return EvaluationMetrics(
         iterations=iterations,
         kdf_us=kdf_us,
@@ -78,6 +89,8 @@ def measure(iterations: int = 100) -> EvaluationMetrics:
         decrypt_us=decrypt_us,
         ml_kem_onboarding_us=_mean_us(onboard, iterations),
         lazy_rekey_us=_mean_us(rekey, iterations),
+        lkh_rekey_us=_mean_us(lkh_rekey, iterations),
+        lkh_rekey_messages=len(pkg8),
         telemetry_envelope_bytes=len(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode("utf-8")),
     )
 

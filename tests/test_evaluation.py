@@ -14,4 +14,6 @@ class EvaluationTests(unittest.TestCase):
         self.assertGreater(result.decrypt_us, 0)
         self.assertGreater(result.ml_kem_onboarding_us, 0)
         self.assertGreater(result.lazy_rekey_us, 0)
+        self.assertGreater(result.lkh_rekey_us, 0)
+        self.assertGreater(result.lkh_rekey_messages, 0)
         self.assertGreater(result.telemetry_envelope_bytes, 0)
