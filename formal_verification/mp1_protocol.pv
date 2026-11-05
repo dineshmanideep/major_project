@@ -1,0 +1,248 @@
+(* ============================================================================== *)
+(*  Formal Verification of MP-1 Post-Quantum Topic-Hierarchical MQTT Protocol     *)
+(*  Tool: ProVerif 2.0+ (Applied Pi-Calculus under Dolev-Yao Adversary Model)     *)
+(*  Authors: Jaivant Kosaraju (231IT028), Paluvadi Dinesh Manideep (231IT047)     *)
+(*  Supervisor: Dr. Bhawana Rudra, Dept. of Information Technology, NITK          *)
+(* ============================================================================== *)
+
+(* 1. Communication Channels *)
+(* Public untrusted channel representing the MQTT Broker / Network Relay *)
+free c: channel.
+
+(* 2. Types *)
+type id.           (* Device & Client Identifiers *)
+type key.          (* 256-bit Symmetric Keys *)
+type label.        (* Topic Segment Labels (e.g. line3, motor, speed, oven) *)
+type nonce.        (* 96-bit Nonces / IVs *)
+type seq.          (* Monotonic Sequence Numbers *)
+type sign_skey.    (* Asymmetric Signing Private Key (Ed25519) *)
+type sign_pkey.    (* Asymmetric Signing Public Key (Ed25519) *)
+type kem_skey.     (* Post-Quantum Decapsulation Key (ML-KEM-512) *)
+type kem_pkey.     (* Post-Quantum Encapsulation Key (ML-KEM-512) *)
+type kem_ct.       (* Post-Quantum Ciphertext *)
+
+(* 3. Cryptographic Primitives & Equations *)
+
+(* 3.1 Authenticated Encryption with Associated Data (AES-256-GCM) *)
+fun aead_enc(bitstring, key, nonce, bitstring): bitstring.
+reduc forall m: bitstring, k: key, n: nonce, aad: bitstring;
+    aead_dec(aead_enc(m, k, n, aad), k, n, aad) = m.
+
+(* 3.2 One-Way Topic-Hierarchical Key Derivation Function (HKDF-Expand) *)
+(* Notice: No destructor for kdf! This models the preimage resistance of SHA-256: *)
+(* Given K_child = kdf(K_parent, label), an attacker cannot derive K_parent or sibling keys. *)
+fun kdf(key, label): key.
+
+(* 3.3 Post-Quantum Key Encapsulation Mechanism (NIST FIPS 203 ML-KEM-512) *)
+fun kem_pk(kem_skey): kem_pkey.
+fun kem_encaps_ct(kem_pkey, nonce): kem_ct.
+fun kem_encaps_ss(kem_pkey, nonce): key.
+reduc forall sk: kem_skey, n: nonce;
+    kem_decaps(kem_encaps_ct(kem_pk(sk), n), sk) = kem_encaps_ss(kem_pk(sk), n).
+
+(* 3.4 Digital Signatures (Ed25519) *)
+fun sign_pk(sign_skey): sign_pkey.
+fun sign(bitstring, sign_skey): bitstring.
+reduc forall m: bitstring, sk: sign_skey;
+    checksign(sign(m, sk), sign_pk(sk)) = m.
+
+(* 3.5 Session Key Derivation from Shared Secret *)
+fun derive_session_key(key, id): key.
+
+(* 4. Public Topic Labels *)
+free label_factory: label.
+free label_line3: label.
+free label_motor: label.
+free label_speed: label.
+free label_oven: label.
+free label_temp: label.
+
+(* 5. Private Secrets for Secrecy Queries *)
+free secret_motor_telemetry_v1: bitstring [private].
+free secret_motor_telemetry_v2: bitstring [private].
+free secret_oven_telemetry: bitstring [private].
+
+(* 6. Security Events for Authentication & Injection Queries *)
+event DeviceOnboarded(id).
+event DeviceSentTelemetry(id, label, bitstring).
+event SubscriberReceivedTelemetry(id, label, bitstring).
+event SiblingReceivedTelemetry(id, label, bitstring).
+event RevokedMemberAcceptedTelemetry(id, label, bitstring).
+
+(* ============================================================================== *)
+(*  SECURITY QUERIES                                                              *)
+(* ============================================================================== *)
+
+(* [Query 1: Confidentiality against Untrusted Broker] *)
+(* Can the Dolev-Yao attacker (the untrusted broker) learn the sensor plaintext? *)
+query attacker(secret_motor_telemetry_v1).
+
+(* [Query 2: Confidentiality of Post-Rekeying Telemetry (Forward Secrecy)] *)
+(* Can the attacker learn the telemetry published under Version 2? *)
+query attacker(secret_motor_telemetry_v2).
+
+(* [Query 3: Sibling Branch Isolation] *)
+(* Can an oven consumer decrypt motor telemetry without possessing K(line3)? *)
+query attacker(secret_oven_telemetry).
+
+(* [Query 4: Message Authenticity & Non-Injection (Correspondence Assertion)] *)
+(* If a subscriber receives telemetry, was it genuinely published by the authorized device? *)
+query d: id, top: label, m: bitstring;
+    inj-event(SubscriberReceivedTelemetry(d, top, m)) ==> inj-event(DeviceSentTelemetry(d, top, m)).
+
+(* ============================================================================== *)
+(*  PROTOCOL PROCESSES                                                            *)
+(* ============================================================================== *)
+
+(* 7.1 Sensor Device Process (e.g., motor-01) *)
+let DeviceProcess(dev_id: id, sk_dev_sign: sign_skey, pk_ctrl_sign: sign_pkey) =
+    (* Phase 1: ML-KEM-512 Key Generation & Onboarding *)
+    new sk_dev_kem: kem_skey;
+    let pk_dev_kem = kem_pk(sk_dev_kem) in
+    let req_content = (dev_id, pk_dev_kem) in
+    let sig_dev = sign((dev_id, pk_dev_kem), sk_dev_sign) in
+    out(c, (dev_id, pk_dev_kem, sig_dev));
+
+    (* Phase 2: Receive Controller Response *)
+    in(c, (=dev_id, ct_kem: kem_ct, sig_ctrl: bitstring));
+    let resp_content = checksign(sig_ctrl, pk_ctrl_sign) in
+    let ss = kem_decaps(ct_kem, sk_dev_kem) in
+    let k_dist = derive_session_key(ss, dev_id) in
+    event DeviceOnboarded(dev_id);
+
+    (* Phase 3: Receive Initial Encrypted Branch Credential *)
+    in(c, (=dev_id, n_init: nonce, ct_init: bitstring));
+    let k_motor_root = aead_dec(ct_init, k_dist, n_init, (dev_id, label_motor)) in
+
+    (* Send Encrypted ACK *)
+    new n_ack: nonce;
+    let ack_payload = aead_enc((dev_id, label_motor), k_dist, n_ack, (dev_id, label_motor)) in
+    out(c, (dev_id, n_ack, ack_payload));
+
+    (* Phase 4: Derive Subtopic Key & Publish Telemetry v1 *)
+    let k_speed = kdf(k_motor_root, label_speed) in
+    new n_telemetry1: nonce;
+    new seq1: seq;
+    let aad1 = (dev_id, label_speed, seq1) in
+    let env1 = aead_enc(secret_motor_telemetry_v1, k_speed, n_telemetry1, aad1) in
+    event DeviceSentTelemetry(dev_id, label_speed, secret_motor_telemetry_v1);
+    out(c, (label_speed, n_telemetry1, seq1, env1));
+
+    (* Phase 5: Receive LKH Rekey Update for Version 2 (After Revocation) *)
+    in(c, (=label_motor, n_rekey: nonce, ct_rekey: bitstring));
+    let k_motor_root_v2 = aead_dec(ct_rekey, k_motor_root, n_rekey, label_motor) in
+
+    (* Phase 6: Publish Telemetry v2 under Fresh Root Key *)
+    let k_speed_v2 = kdf(k_motor_root_v2, label_speed) in
+    new n_telemetry2: nonce;
+    new seq2: seq;
+    let aad2 = (dev_id, label_speed, seq2) in
+    let env2 = aead_enc(secret_motor_telemetry_v2, k_speed_v2, n_telemetry2, aad2) in
+    event DeviceSentTelemetry(dev_id, label_speed, secret_motor_telemetry_v2);
+    out(c, (label_speed, n_telemetry2, seq2, env2)).
+
+
+(* 7.2 Key Controller Process *)
+let ControllerProcess(pk_dev_sign: sign_pkey, sk_ctrl_sign: sign_skey, dev_id: id, k_motor_root: key, k_vendor: key) =
+    (* Phase 1: Verify Device Request *)
+    in(c, (=dev_id, pk_dev_kem: kem_pkey, sig_dev: bitstring));
+    let req_content = checksign(sig_dev, pk_dev_sign) in
+
+    (* Phase 2: Post-Quantum ML-KEM Encapsulation *)
+    new n_kem: nonce;
+    let ct_kem = kem_encaps_ct(pk_dev_kem, n_kem) in
+    let ss = kem_encaps_ss(pk_dev_kem, n_kem) in
+    let k_dist = derive_session_key(ss, dev_id) in
+    let sig_ctrl = sign((dev_id, ct_kem), sk_ctrl_sign) in
+    out(c, (dev_id, ct_kem, sig_ctrl));
+
+    (* Phase 3: Deliver Initial Branch Key *)
+    new n_init: nonce;
+    let ct_init = aead_enc(k_motor_root, k_dist, n_init, (dev_id, label_motor)) in
+    out(c, (dev_id, n_init, ct_init));
+
+    (* Verify ACK *)
+    in(c, (=dev_id, n_ack: nonce, ack_payload: bitstring));
+    let ack_content = aead_dec(ack_payload, k_dist, n_ack, (dev_id, label_motor)) in
+
+    (* Phase 4: Revocation Event -> Rotate Root Key to Version 2 *)
+    (* Generate fresh root key k_motor_root_v2 *)
+    new k_motor_root_v2: key;
+
+    (* LKH Rekeying Broadcast: Encrypt k_motor_root_v2 under k_motor_root for motor-01 *)
+    new n_rekey: nonce;
+    let ct_rekey = aead_enc(k_motor_root_v2, k_motor_root, n_rekey, label_motor) in
+    out(c, (label_motor, n_rekey, ct_rekey)).
+
+
+(* 7.3 Authorized Gateway / Subscriber Process (Holds ancestor key K_motor) *)
+let AuthorizedSubscriberProcess(k_motor_root: key) =
+    (* Receive Telemetry v1 *)
+    in(c, (=label_speed, n1: nonce, s1: seq, env1: bitstring));
+    let k_speed = kdf(k_motor_root, label_speed) in
+    let aad1 = (label_speed, s1) in
+    let plaintext1 = aead_dec(env1, k_speed, n1, aad1) in
+    event SubscriberReceivedTelemetry(label_motor, label_speed, plaintext1);
+
+    (* Receive Rekey Package & Update Root Key *)
+    in(c, (=label_motor, n_rekey: nonce, ct_rekey: bitstring));
+    let k_motor_root_v2 = aead_dec(ct_rekey, k_motor_root, n_rekey, label_motor) in
+
+    (* Receive Telemetry v2 *)
+    in(c, (=label_speed, n2: nonce, s2: seq, env2: bitstring));
+    let k_speed_v2 = kdf(k_motor_root_v2, label_speed) in
+    let aad2 = (label_speed, s2) in
+    let plaintext2 = aead_dec(env2, k_speed_v2, n2, aad2) in
+    event SubscriberReceivedTelemetry(label_motor, label_speed, plaintext2).
+
+
+(* 7.4 Revoked Member Process (Vendor: Holds only initial K_vendor; revoked on v2) *)
+let RevokedMemberProcess(k_vendor: key) =
+    (* Can decrypt v1 if authorized for v1 *)
+    in(c, (=label_speed, n2: nonce, s2: seq, env2: bitstring));
+    let k_speed_stale = kdf(k_vendor, label_speed) in
+    let aad2 = (label_speed, s2) in
+    let pt2 = aead_dec(env2, k_speed_stale, n2, aad2) in
+    event RevokedMemberAcceptedTelemetry(label_motor, label_speed, pt2).
+
+
+(* 7.5 Sibling Branch Subscriber Process (Authorized for Oven only; tries to access Motor) *)
+let SiblingSubscriberProcess(k_oven_root: key) =
+    in(c, (=label_speed, n: nonce, s: seq, env: bitstring));
+    (* Attempts to derive motor speed from oven root key *)
+    let k_illegal = kdf(k_oven_root, label_speed) in
+    let aad = (label_speed, s) in
+    let pt = aead_dec(env, k_illegal, n, aad) in
+    event SiblingReceivedTelemetry(label_oven, label_speed, pt).
+
+
+(* ============================================================================== *)
+(*  MAIN PROCESS INITIALIZATION                                                   *)
+(* ============================================================================== *)
+
+process
+    (* Setup Asymmetric Identity Keys (Ed25519) *)
+    new sk_dev_sign: sign_skey;
+    let pk_dev_sign = sign_pk(sk_dev_sign) in
+    new sk_ctrl_sign: sign_skey;
+    let pk_ctrl_sign = sign_pk(sk_ctrl_sign) in
+
+    (* Publish public identity keys to untrusted network *)
+    out(c, pk_dev_sign);
+    out(c, pk_ctrl_sign);
+
+    (* Initialize Branch Root Keys *)
+    new k_motor_root: key;
+    new k_oven_root: key;
+    new k_vendor_key: key;
+    new dev_motor: id;
+
+    (* Concurrent execution of all network participants *)
+    (
+        DeviceProcess(dev_motor, sk_dev_sign, pk_ctrl_sign) |
+        ControllerProcess(pk_dev_sign, sk_ctrl_sign, dev_motor, k_motor_root, k_vendor_key) |
+        AuthorizedSubscriberProcess(k_motor_root) |
+        RevokedMemberProcess(k_vendor_key) |
+        SiblingSubscriberProcess(k_oven_root)
+    )
+
