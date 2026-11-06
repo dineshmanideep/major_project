@@ -4,7 +4,7 @@
 > **Course / Degree:** Bachelor of Technology in Information Technology (Major Project, IT449)  
 > **Institution:** National Institute of Technology Karnataka (NITK), Surathkal  
 > **Authors:** Jaivant Kosaraju (231IT028), Paluvadi Dinesh Manideep (231IT047)  
-> **Supervisor:** Dr. Bhawana Rudra, Department of Information Technology  
+   
 > **Implementation Artifacts:** Python 3.10+ Reference Implementation with NIST FIPS 203 ML-KEM-512, HKDF-Expand (HMAC-SHA-256), AES-256-GCM, $O(\log N)$ LKH Tree, and Multi-Process TCP MQTT Network Services.
 
 ---

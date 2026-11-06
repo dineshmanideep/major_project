@@ -4,7 +4,7 @@
 > **Course / Degree:** B.Tech Information Technology (Major Project, IT449)  
 > **Institution:** National Institute of Technology Karnataka (NITK), Surathkal  
 > **Authors:** Jaivant Kosaraju (231IT028), Paluvadi Dinesh Manideep (231IT047)  
-> **Supervisor:** Dr. Bhawana Rudra, Department of Information Technology  
+   
 > **Cryptographic Stack:** Classical Elliptic Curve Diffie-Hellman (**X25519 / Curve25519**), **Ed25519** Digital Signatures, **HKDF-Expand (HMAC-SHA-256)**, **AES-256-GCM**, and **$O(\log N)$ Logical Key Hierarchy (LKH)**.
 
 ---
@@ -94,7 +94,8 @@ classical_simulation/
 │   ├── test_lkh_tree.py            # LKH tree O(log N) scaling & lockout unit tests
 │   └── test_full_simulation.py     # End-to-end scenario integration test
 ├── README.md                       # This comprehensive technical guide
-└── SETUP_AND_ARCHITECTURE.md       # In-depth architectural & setup specification
+├── SETUP_AND_ARCHITECTURE.md       # In-depth architectural & setup specification
+└── VIVA_AND_WORK_SPLIT_GUIDE.md    # 2-Person Work Split, Theory Syllabus, & Viva Voce Guide
 ```
 
 ---

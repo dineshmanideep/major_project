@@ -71,7 +71,8 @@ classical_simulation/
 │   ├── test_lkh_tree.py            # LKH tree O(log N) package size & client tests
 │   └── test_full_simulation.py     # End-to-end integration test
 ├── README.md                       # High-level overview & quick-start guide
-└── SETUP_AND_ARCHITECTURE.md       # This detailed manual
+├── SETUP_AND_ARCHITECTURE.md       # This detailed manual
+└── VIVA_AND_WORK_SPLIT_GUIDE.md    # 2-Person Work Split, Theory Syllabus, & Viva Voce Guide
 ```
 
 ---

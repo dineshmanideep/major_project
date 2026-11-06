@@ -2,7 +2,7 @@
 (*  Formal Verification of MP-1 Post-Quantum Topic-Hierarchical MQTT Protocol     *)
 (*  Tool: ProVerif 2.0+ (Applied Pi-Calculus under Dolev-Yao Adversary Model)     *)
 (*  Authors: Jaivant Kosaraju (231IT028), Paluvadi Dinesh Manideep (231IT047)     *)
-(*  Supervisor: Dr. Bhawana Rudra, Dept. of Information Technology, NITK          *)
+(*         *)
 (* ============================================================================== *)
 
 (* 1. Communication Channels *)
